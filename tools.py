@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,33 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+
+# ── shared constants / helpers ──────────────────────────────────────────────────
+
+# Ranking for the search tiebreak (better condition wins on equal relevance score).
+CONDITION_RANK = {"excellent": 3, "good": 2, "fair": 1}
+
+# Minimal stopword set for tokenizing the search `description`. Kept small on purpose:
+# none of these collide with item nouns or style words. NOTE: "vintage" is deliberately
+# NOT a stopword — the Tool 1 spec keeps it as a scored token (it is also a style_tag).
+_STOPWORDS = {
+    "a", "an", "the", "in", "of", "for", "with",
+    "under", "size", "and", "to", "my", "that", "is",
+}
+
+
+def _description_tokens(text: str) -> list[str]:
+    """Lowercase + tokenize on [a-z0-9]+ runs, dropping stopwords. Order preserved
+    so the head noun is the last surviving token."""
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
+
+
+def _size_tokens(size: str) -> set[str]:
+    """Tokenize a size label into a lowercased set, splitting on '/', whitespace,
+    and parentheses (e.g. 'US 8' -> {'us', '8'}, 'One Size / Oversized' ->
+    {'one', 'size', 'oversized'})."""
+    return {t for t in re.split(r"[/\s()]+", size.lower()) if t}
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -69,8 +97,56 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    query_tokens = _description_tokens(description)
+    # Empty/keyword-less description is not a real search → no results.
+    if not query_tokens:
+        return []
+    head_noun = query_tokens[-1]
+    requested_size = _size_tokens(size) if size else None
+
+    scored = []
+    for item in listings:
+        # 1. Hard filter — price.
+        if max_price is not None and item["price"] > max_price:
+            continue
+
+        # 2. Hard filter — size (subset rule: every requested token must be present,
+        #    OR the listing is a One Size variant).
+        if requested_size is not None:
+            item_size = _size_tokens(item["size"])
+            is_one_size = "one" in item_size and "size" in item_size
+            if not is_one_size and not requested_size.issubset(item_size):
+                continue
+
+        # 3. Relevance score over combined text (title + description + tags + category
+        #    + colors), counting distinct query tokens present.
+        combined = " ".join([
+            item["title"],
+            item["description"],
+            " ".join(item["style_tags"]),
+            item["category"],
+            " ".join(item["colors"]),
+        ]).lower()
+        item_tokens = set(re.findall(r"[a-z0-9]+", combined))
+        score = sum(1 for t in set(query_tokens) if t in item_tokens)
+
+        # 4. Drop score-0 and 5. head-noun gate (head noun must appear in the text).
+        if score == 0 or head_noun not in item_tokens:
+            continue
+
+        scored.append((score, item))
+
+    # 6. Sort by score desc, then condition desc, then price asc.
+    scored.sort(
+        key=lambda pair: (
+            -pair[0],
+            -CONDITION_RANK.get(pair[1]["condition"], 0),
+            pair[1]["price"],
+        )
+    )
+    return [item for _score, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
