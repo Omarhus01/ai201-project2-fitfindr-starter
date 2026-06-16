@@ -324,49 +324,28 @@ added because the loop depends on them.)
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    U([User query]) --> INIT["Step 0: session = _new_session(query, wardrobe)"]
+    INIT --> P["Step 1: parse + scope gate — LLM<br/>returns {description, size, max_price, in_scope}"]
+    P -->|"1a: parse fail / bad JSON"| ERR[["session.error set<br/>(early return)"]]
+    P -->|"1b: in_scope = false"| ERR
+    P -->|"valid → session.parsed"| S["Step 2: search_listings(description, size, max_price)<br/>pure fn, no LLM"]
+    S -->|"2a: results == [] "| ERR
+    S -->|"results = [...] → session.search_results"| SEL["Step 3: session.selected_item = search_results[0]"]
+    SEL --> SO["Step 4: suggest_outfit(selected_item, wardrobe) — LLM<br/>empty wardrobe → general-advice fallback<br/>→ session.outfit_suggestion"]
+    SO --> FC["Step 5: create_fit_card(outfit_suggestion, selected_item) — LLM (temp ~0.9)<br/>→ session.fit_card"]
+    FC --> RET["Step 6: return session"]
+    ERR --> RET
+    RET --> APP{"app.py handle_query:<br/>error set?"}
+    APP -->|"yes"| EP["panel 1 = error<br/>panels 2 and 3 empty"]
+    APP -->|"no"| OP["panel 1 = selected_item<br/>panel 2 = outfit<br/>panel 3 = fit_card"]
 ```
-User query
-   │
-   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ PLANNING LOOP  (run_agent, agent.py)                         │
-│ session = _new_session(query, wardrobe)   ◄──── wardrobe     │
-│                                                              │
-│ Step 1: parse + scope gate ── LLM parse ──► {description,    │
-│         │                       size, max_price, in_scope}   │
-│         ├─[1a parse fail / bad JSON]─► session.error ──┐     │
-│         ├─[1b in_scope=false]────────► session.error ──┤     │
-│         │                                              │     │
-│         ▼ session.parsed                               │     │
-│ Step 2: search_listings(description, size, max_price)  │     │
-│         │  (pure fn, no LLM)                           │     │
-│         ├─[2a results==[] ]──────────► session.error ──┤     │
-│         │                                              │     │
-│         ▼ session.search_results=[...]                 │     │
-│ Step 3: session.selected_item = search_results[0]      │     │
-│         │                                              │     │
-│         ▼                                              │     │
-│ Step 4: suggest_outfit(selected_item, wardrobe) ─ LLM  │     │
-│         │  empty wardrobe → general-advice fallback    │     │
-│         ▼ session.outfit_suggestion="..."              │     │
-│ Step 5: create_fit_card(outfit_suggestion,             │     │
-│         │              selected_item) ─ LLM (temp~0.9) │     │
-│         ▼ session.fit_card="..."                       │     │
-│ Step 6: return session ◄───────────────────────────────┘     │
-│         (early returns land here too: error set,             │
-│          outfit_suggestion & fit_card stay None)             │
-└─────────────────────────────────────────────────────────────┘
-   │
-   ▼
-app.py handle_query reads session:
-   error set? → panel 1 = error, panels 2 & 3 empty
-   else       → panel 1 = selected_item, 2 = outfit, 3 = fit_card
 
-SESSION (single source of truth, _new_session):
-   query · parsed · search_results · selected_item · wardrobe
-   · outfit_suggestion · fit_card · error
-   every tool reads its inputs from session, writes output back to session
-```
+**SESSION** (single source of truth, `_new_session`): `query · parsed · search_results ·
+selected_item · wardrobe · outfit_suggestion · fit_card · error`. Every tool reads its
+inputs from `session` and writes its output back to `session`; the three error branches
+(1a, 1b, 2a) all set `session.error` and short-circuit to the return.
 
 ---
 
