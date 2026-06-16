@@ -324,14 +324,49 @@ added because the loop depends on them.)
 
 ## Architecture
 
-<!-- Draw a diagram of your agent showing how the components connect:
-     User input → Planning Loop → Tools (search_listings, suggest_outfit, create_fit_card)
-                                                                          ↕
-                                                                   State / Session
-     Show what triggers each tool, how state flows between them, and where error paths branch off.
-     ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
-     sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
-     the planning loop and each individual tool. -->
+```
+User query
+   │
+   ▼
+┌─────────────────────────────────────────────────────────────┐
+│ PLANNING LOOP  (run_agent, agent.py)                         │
+│ session = _new_session(query, wardrobe)   ◄──── wardrobe     │
+│                                                              │
+│ Step 1: parse + scope gate ── LLM parse ──► {description,    │
+│         │                       size, max_price, in_scope}   │
+│         ├─[1a parse fail / bad JSON]─► session.error ──┐     │
+│         ├─[1b in_scope=false]────────► session.error ──┤     │
+│         │                                              │     │
+│         ▼ session.parsed                               │     │
+│ Step 2: search_listings(description, size, max_price)  │     │
+│         │  (pure fn, no LLM)                           │     │
+│         ├─[2a results==[] ]──────────► session.error ──┤     │
+│         │                                              │     │
+│         ▼ session.search_results=[...]                 │     │
+│ Step 3: session.selected_item = search_results[0]      │     │
+│         │                                              │     │
+│         ▼                                              │     │
+│ Step 4: suggest_outfit(selected_item, wardrobe) ─ LLM  │     │
+│         │  empty wardrobe → general-advice fallback    │     │
+│         ▼ session.outfit_suggestion="..."              │     │
+│ Step 5: create_fit_card(outfit_suggestion,             │     │
+│         │              selected_item) ─ LLM (temp~0.9) │     │
+│         ▼ session.fit_card="..."                       │     │
+│ Step 6: return session ◄───────────────────────────────┘     │
+│         (early returns land here too: error set,             │
+│          outfit_suggestion & fit_card stay None)             │
+└─────────────────────────────────────────────────────────────┘
+   │
+   ▼
+app.py handle_query reads session:
+   error set? → panel 1 = error, panels 2 & 3 empty
+   else       → panel 1 = selected_item, 2 = outfit, 3 = fit_card
+
+SESSION (single source of truth, _new_session):
+   query · parsed · search_results · selected_item · wardrobe
+   · outfit_suggestion · fit_card · error
+   every tool reads its inputs from session, writes output back to session
+```
 
 ---
 
@@ -348,9 +383,32 @@ added because the loop depends on them.)
      search_listings() using load_listings() from the data loader — then test it against 3 queries
      before trusting it" is a plan. -->
 
-**Milestone 3 — Individual tool implementations:**
+**Milestone 3 — individual tool implementations (Claude Code).**
+- **search_listings:** give Claude Code the committed Tool 1 spec (inputs, return, 6-step
+  algorithm, token-boundary size rule, head-noun gate, `CONDITION_RANK` tiebreak) + the
+  precondition that `description` is a clean head-noun-last phrase. Expect: a pure function
+  using `load_listings()`, no LLM. Verify before trusting: filters by all three params;
+  token-equality not substring (`8` ≠ `US 8.5`, `L` ∉ `XL`); drops score-0 + head-noun-absent;
+  returns `[]` not an exception on no match. Test with the 5 `app.py` queries — confirm the
+  3 no-results queries return `[]` and the other 2 return sensible tops.
+- **suggest_outfit:** give the Tool 2 spec (branch on empty wardrobe, whole-wardrobe +
+  notes-in-prompt, by-name references, model id, defensive `wardrobe.get("items", [])`,
+  empty/raise fallbacks). Expect: one function, two prompt paths, never crashes. Verify:
+  non-empty wardrobe names real pieces; empty wardrobe returns general advice not `""`;
+  a forced API error returns the fallback string.
+- **create_fit_card:** give the Tool 3 spec (empty-outfit guard, name/price/platform once,
+  `$22`/lowercase formatting, temp 0.9–1.0 no fixed seed, `max_tokens`). Expect: a varied
+  caption. Verify: empty outfit returns the descriptive error string (no LLM call); the same
+  input run 3× yields different captions; price renders `$22` not `$22.0`.
 
-**Milestone 4 — Planning loop and state management:**
+**Milestone 4 — planning loop + state (Claude Code).**
+- Give Claude Code the committed Planning Loop section + the Architecture diagram above +
+  the State table. Expect: `run_agent()` implementing Steps 0–6 with branches 1a/1b/2a as
+  early returns, writing only existing session keys. Verify before trusting: it branches on
+  `search_results` (not all-three-unconditionally); no early-return path reaches Step 4;
+  the `selected_item` set in Step 3 is the exact dict passed to Steps 4 & 5 (print it); only
+  the parser is wrapped in `try/except`. Then `handle_query()` in `app.py`: empty-query
+  guard, maps `session` → 3 panels, reads `error` first.
 
 ---
 
@@ -381,14 +439,34 @@ empty input.
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1 — parse + scope gate.** The LLM parser reads the raw sentence and returns
+`{description: "vintage graphic tee", size: null, max_price: 30.0, in_scope: true}`.
+("baggy jeans / chunky sneakers" is wardrobe context, not a search filter, so it is not
+extracted into `description`.) `in_scope` is true → store in `session.parsed`, continue.
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 2 — search.** `search_listings("vintage graphic tee", None, 30.0)` runs the 6-step
+algorithm: price filter ≤ 30, no size filter, score by keyword overlap, head-noun "tee"
+must be present. Returns 5 matching listings, top results are tees, sorted by relevance →
+condition → price, stored in `session.search_results`. Non-empty → no 2a branch, continue.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 3 — select.** `session.selected_item = search_results[0]` — the top tee:
+**"Y2K Baby Tee — Butterfly Print"** ($18, depop, excellent condition, size S/M, brand
+`None`). This exact dict now flows forward unchanged.
 
-**Final output to user:**
-<!-- What does the user actually see at the end? -->
+**Step 4 — suggest outfit.** `suggest_outfit(<that tee dict>, <example wardrobe>)` passes
+the whole 10-item wardrobe (name + category + colors + style_tags + notes) and the item to
+the LLM. Returns prose naming real pieces, e.g. "Style this fitted butterfly baby tee with
+your Baggy straight-leg jeans, dark wash and Chunky white sneakers for an easy y2k look —
+let it sit cropped over the high waist." Stored in `session.outfit_suggestion`.
+
+**Step 5 — fit card.** `create_fit_card(<that suggestion>, <that tee dict>)` produces a
+casual caption mentioning name/price/platform once each at temp ~0.9, e.g. "found this y2k
+butterfly baby tee on depop for $18 🦋 wearing it cropped over my baggy jeans." Stored in
+`session.fit_card`. (No brand mention — this listing's `brand` is `None`.)
+
+**Step 6 — return.** `error` is None; all three output fields are populated.
+
+**Final output to user (app.py panels):**
+- 🛍️ Top listing: **Y2K Baby Tee — Butterfly Print — $18, depop, excellent condition**
+- 👗 Outfit idea: the `suggest_outfit` prose
+- ✨ Fit card: the caption
