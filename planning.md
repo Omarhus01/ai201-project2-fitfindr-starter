@@ -100,10 +100,12 @@ Never raises.
 2. **Hard filter — price:** keep if `max_price is None or listing["price"] <= max_price`.
 3. **Hard filter — size:** if `None`, keep all. Else tokenize both the requested size and
    `listing["size"]` (split on `/`, whitespace, and parentheses → lowercased token set);
-   keep if any requested token EQUALS a listing token, OR the listing is a `One Size`
-   variant. Token-equality, never substring — so `8` matches `US 8` but not `US 8.5`, and
-   `L` matches `L`/`L/XL`/`M/L` but not `XL` or `W30 L30`. No stemming: `boot` ≠ `boots`
-   by design (the parser emits the data form).
+   keep if **every** requested token is present in the listing's token set, OR the listing
+   is a `One Size` variant. Token-equality (subset), never substring. Examples: `US 8`
+   (`{us, 8}`) matches only `US 8` — NOT `US 8.5` (`{us, 8.5}`), because the token `8` is
+   absent there even though `us` is shared; `8` (`{8}`) likewise matches only `US 8`; `L`
+   (`{l}`) matches `L`, `L/XL`, `M/L` (each contains the `l` token) but not `XL` or
+   `W30 L30`. No stemming: `boot` ≠ `boots` by design (the parser emits the data form).
 4. **Relevance score:** lowercase + tokenize `description`, drop trivial stopwords; build
    the listing's combined text from `title + description + style_tags + category + colors`
    (joined, lowercased); score = count of distinct query tokens present.
@@ -362,32 +364,52 @@ inputs from `session` and writes its output back to `session`; the three error b
      search_listings() using load_listings() from the data loader — then test it against 3 queries
      before trusting it" is a plan. -->
 
-**Milestone 3 — individual tool implementations (Claude Code).**
-- **search_listings:** give Claude Code the committed Tool 1 spec (inputs, return, 6-step
-  algorithm, token-boundary size rule, head-noun gate, `CONDITION_RANK` tiebreak) + the
-  precondition that `description` is a clean head-noun-last phrase. Expect: a pure function
-  using `load_listings()`, no LLM. Verify before trusting: filters by all three params;
-  token-equality not substring (`8` ≠ `US 8.5`, `L` ∉ `XL`); drops score-0 + head-noun-absent;
-  returns `[]` not an exception on no match. Test with the 5 `app.py` queries — confirm the
-  3 no-results queries return `[]` and the other 2 return sensible tops.
-- **suggest_outfit:** give the Tool 2 spec (branch on empty wardrobe, whole-wardrobe +
-  notes-in-prompt, by-name references, model id, defensive `wardrobe.get("items", [])`,
-  empty/raise fallbacks). Expect: one function, two prompt paths, never crashes. Verify:
-  non-empty wardrobe names real pieces; empty wardrobe returns general advice not `""`;
-  a forced API error returns the fallback string.
-- **create_fit_card:** give the Tool 3 spec (empty-outfit guard, name/price/platform once,
-  `$22`/lowercase formatting, temp 0.9–1.0 no fixed seed, `max_tokens`). Expect: a varied
-  caption. Verify: empty outfit returns the descriptive error string (no LLM call); the same
-  input run 3× yields different captions; price renders `$22` not `$22.0`.
+**Milestone 3, individual tool implementations.**
 
-**Milestone 4 — planning loop + state (Claude Code).**
-- Give Claude Code the committed Planning Loop section + the Architecture diagram above +
-  the State table. Expect: `run_agent()` implementing Steps 0–6 with branches 1a/1b/2a as
-  early returns, writing only existing session keys. Verify before trusting: it branches on
-  `search_results` (not all-three-unconditionally); no early-return path reaches Step 4;
-  the `selected_item` set in Step 3 is the exact dict passed to Steps 4 & 5 (print it); only
-  the parser is wrapped in `try/except`. Then `handle_query()` in `app.py`: empty-query
-  guard, maps `session` → 3 panels, reads `error` first.
+I'm using Claude Code for all three tools, but one at a time. For each one I paste in only
+that tool's spec from this file so it builds to my design instead of guessing, and I read
+the generated code against the spec before I run anything.
+
+For search_listings I'll give it the Tool 1 spec, which already has the inputs, the return
+value, the full 6 step algorithm, the token equality size rule, the head noun gate, and the
+CONDITION_RANK tiebreak. I'll also remind it of the precondition that description arrives as
+a clean head noun last phrase. What I expect back is a plain Python function that uses
+load_listings() and never touches an LLM. Before I trust it I'll check that it filters by all
+three parameters, that size matching is token equality and not substring (so "8" matches
+"US 8" but not "US 8.5", and "L" does not match "XL"), that it drops the score 0 and head
+noun absent listings, and that it returns [] instead of raising when nothing matches. Then
+I'll run the 5 example queries from app.py and confirm the 3 impossible ones (flowy midi
+skirt, black combat boots size 8, designer ballgown size XXS under $5) come back empty while
+the other 2 return sensible tops.
+
+For suggest_outfit I'll give it the Tool 2 spec, with the empty wardrobe branch, the part
+about passing the whole wardrobe including notes, naming real pieces, the model id, the
+defensive wardrobe.get("items", []) access, and the empty and error fallbacks. I expect one
+function with two prompt paths that never crashes. I'll verify it three ways: with the full
+example wardrobe it should name real pieces like the baggy jeans and the chunky sneakers,
+with an empty wardrobe it should give general advice and not return an empty string, and with
+a forced API error it should return the fallback string instead of blowing up.
+
+For create_fit_card I'll give it the Tool 3 spec, with the empty outfit guard, mentioning the
+name, price, and platform once each, the formatting rule ($22 not $22.0 and lowercase
+platform), temperature 0.9 to 1.0 with no fixed seed, and the max_tokens cap. I expect a
+short casual caption that reads like a real post and changes every run. I'll verify that an
+empty outfit string returns the descriptive error string without calling the LLM, that the
+same input run three times gives three different captions, and that the price shows as $22.
+
+**Milestone 4, planning loop and state.**
+
+I'm using Claude Code again here, but this time I feed it the Planning Loop section, the
+Architecture diagram, and the State Management table together, so it has the branches, the
+data flow, and the session keys all at once. What I expect back is run_agent() built as
+Steps 0 to 6, with branches 1a, 1b, and 2a written as early returns, and writing only to
+session keys that already exist in _new_session(). Before I trust it I'll check the things
+that prove the loop is real: that it branches on what search_listings returns instead of
+calling all three tools every time, that no early return path ever reaches suggest_outfit,
+that the selected_item set in Step 3 is the exact same dict handed to Steps 4 and 5 (I'll
+print it to confirm), and that only the parser call is wrapped in try/except. Once the loop
+works I'll have it write handle_query() in app.py, which guards an empty query, calls
+run_agent(), reads error first, and maps the session into the three output panels.
 
 ---
 
@@ -404,17 +426,6 @@ propose how to wear it; that suggestion flows into create_fit_card, which
 writes a short shareable caption. If search_listings finds nothing, the agent
 tells the user what to adjust and stops — it does not call the later tools with
 empty input.
-
-**Things I saw in listings.json that I will need for Tool 1 spec:**
-- Size labels are inconsistent across four families: letter (M, S/M, XL),
-  "One Size"/oversized variants, waist (W30, W30 L30), and US shoe sizes (US 8).
-  There are NO EU sizes and NO numeric body measurements — only labels.
-- User queries use different vocabulary than the labels ("medium" -> "M",
-  "size 8" -> "US 8"). Tool 1 must normalize the query to match the label,
-  not the other way around.
-- Decision: normalize obvious synonyms; treat size=None as "no filter";
-  a size that simply isn't in the data (e.g. EU 45) is a legitimate no-results
-  case -> error path, NOT a conversion to attempt.
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
