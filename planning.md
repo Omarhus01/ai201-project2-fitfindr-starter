@@ -161,7 +161,8 @@ matters more than novelty here — variability is Tool 3's job, not this one); o
 **What happens if it fails or returns nothing:**
 - Empty wardrobe → handled by the fallback branch above (not an error).
 - LLM returns empty/whitespace → return a safe non-empty fallback string ("Couldn't
-  generate a styling idea for this one — try another item."), never `""`.
+  generate a full styling idea for this one — but it's a versatile piece worth grabbing."),
+  never `""`.
 - LLM call raises (timeout/API error) → catch it, return a graceful fallback string, never
   propagate the exception.
 - Item/wardrobe text is framed as descriptive data to style, never as instructions (the
@@ -214,26 +215,110 @@ of temperature); optional `max_tokens` ceiling to hold the 2–4 sentence target
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
-<!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
+
+The loop is a deterministic pipeline with explicit early-return branches. The LLM is used
+ONLY inside two places (the parse call and the two styling tools) — it never chooses which
+tool to call. The order is fixed by data dependency (can't style an item before finding
+it; can't caption an outfit before styling it); the BRANCHING is what changes behavior,
+not the order. The steps below map 1:1 onto `run_agent()`'s TODO in `agent.py`, with a
+numbering offset: **planning Step N = agent.py Step N+1** (the file numbers init as Step 1).
+
+**Step 0 — initialize.** `session = _new_session(query, wardrobe)`.
+
+**Step 1 — parse + scope gate (LLM call).** Send the raw query to the parser, which
+returns JSON `{ description, size, max_price, in_scope }` per D1. Note `in_scope` is a
+**4th key** in the parsed dict beyond the stub's description/size/max_price.
+- BRANCH 1a — parse failure: if the call raises OR returns non-JSON / missing keys →
+  set `session["error"]` to the parse-failure message (see error table) and RETURN.
+  Never pass garbage downstream.
+- BRANCH 1b — out of scope: if `in_scope` is false → set `session["error"]` to the
+  out-of-scope / safety-redirect message and RETURN. The styling LLM never sees off-topic
+  or distressing input.
+- Else: store the parsed dict in `session["parsed"]` and continue.
+
+**Step 2 — search (pure function).**
+`results = search_listings(parsed["description"], parsed["size"], parsed["max_price"])`.
+Store in `session["search_results"]`.
+- BRANCH 2a — no results: if `results == []` → set `session["error"]` to the no-results
+  message and RETURN. Do NOT call `suggest_outfit`. (This is THE branch the grader checks:
+  the agent must behave differently here than on the happy path.)
+- Else: continue.
+
+**Step 3 — select.** `session["selected_item"] = session["search_results"][0]` (top
+result; Tool 1 already sorted by relevance → condition → price).
+
+**Step 4 — suggest outfit (LLM call).**
+`suggestion = suggest_outfit(session["selected_item"], session["wardrobe"])`. Store in
+`session["outfit_suggestion"]`. No early-return here: an empty wardrobe is a FALLBACK
+inside the tool (general advice), not an error, and an LLM failure returns a fallback
+string. The tool always returns a non-empty string, so the loop proceeds.
+
+**Step 5 — fit card (LLM call).**
+`card = create_fit_card(session["outfit_suggestion"], session["selected_item"])`. Store in
+`session["fit_card"]`. No early-return: in the live flow `outfit_suggestion` is always
+non-empty (Step 4 guarantees it), so the empty-outfit guard never fires here — it exists
+for isolation tests / M5. An LLM failure returns a fallback string.
+
+**Step 6 — return.** Return `session`. On success `error` is None and `outfit_suggestion`
++ `fit_card` are populated; on any early return `error` is set and the later fields stay None.
+
+**Done condition:** the pipeline has no while-loop / retries — it runs once, top to bottom,
+and terminates either at an early-return branch or after Step 6. (The stretch "retry with
+loosened constraints" would add a loop around Step 2 later; not in the baseline.)
+
+**Error-handling division (deliberate):** the loop wraps only the parser (Step 1) in
+`try/except`. Tools 1–3 self-handle — Tool 1 never raises, Tools 2/3 catch their own LLM
+errors and return fallback strings — so the loop trusts their contracts and does not wrap
+Steps 2/4/5. One honest gap: a catastrophic `load_listings()` IO failure (e.g. data file
+deleted) would propagate uncaught; acceptable, since the data is bundled with the repo.
+The empty/whitespace-query guard lives in `app.py`'s `handle_query`, not in the loop.
 
 ---
 
 ## State Management
 
 **How does information from one tool get passed to the next?**
-<!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+
+Single source of truth: the `session` dict from `_new_session()`. No globals, no
+re-prompting the user mid-run, no hardcoded values between steps — every tool reads its
+inputs from `session` and writes its output back to `session`.
+
+What's stored, when it's set, and what reads it next:
+
+| Key | Set in | Value | Read by |
+|-----|--------|-------|---------|
+| `query` | Step 0 | raw user string | Step 1 parser |
+| `wardrobe` | Step 0 | wardrobe dict (example or empty) | Step 4 `suggest_outfit` |
+| `parsed` | Step 1 | `{description, size, max_price, in_scope}` | Step 2 `search_listings` |
+| `search_results` | Step 2 | `list[dict]` of listings (may be `[]`) | Step 2 branch + Step 3 |
+| `selected_item` | Step 3 | top listing dict | Steps 4 & 5 |
+| `outfit_suggestion` | Step 4 | styling string | Step 5 `create_fit_card` |
+| `fit_card` | Step 5 | caption string | `app.py` output panel |
+| `error` | any early-return branch | message string (else `None`) | `app.py` — checked FIRST |
+
+State-flow guarantee for the demo: the `selected_item` set in Step 3 is the EXACT dict
+passed into both Step 4 and Step 5 — no re-entry, no reconstruction. This is what the demo
+prints to show state passing. `app.py` reads `error` first; if set, it shows the error in
+panel 1 and leaves the other two empty.
 
 ---
 
 ## Error Handling
 
-For each tool, describe the specific failure mode you're handling and what the agent does in response.
+For each tool, describe the specific failure mode you're handling and what the agent does
+in response. Each response is specific and actionable — it names what failed and what the
+user can do next. (The template's three required rows are present; the two parser rows are
+added because the loop depends on them.)
 
-| Tool | Failure mode | Agent response |
-|------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| Tool / step | Failure mode | Agent response (specific + actionable) |
+|-------------|--------------|----------------------------------------|
+| parser (Step 1) | call raises or returns non-JSON / missing keys | "I couldn't read that request — try naming an item, a size, or a price, e.g. 'vintage denim jacket size M under $40.'" → return early, no tools called |
+| parser (Step 1) | `in_scope == false` (off-topic / distressing) | Brief, kind, on-topic redirect: state that FitFindr only helps find and style secondhand clothes; if the input signals distress, respond gently and point toward real support rather than styling it. → return early |
+| search_listings (Step 2) | `results == []` | Name what was searched and what to loosen: "No listings matched 'X' in size Y under $Z. Try removing the size filter, raising the price, or searching a different item." → return early, `suggest_outfit` NOT called |
+| suggest_outfit (Step 4) | wardrobe is empty | NOT an error — the tool returns general styling advice for the item (what pairs well, what vibe it suits) instead of naming owned pieces. Flow continues to the fit card. |
+| suggest_outfit (Step 4) | LLM returns empty / raises | Tool returns a safe non-empty fallback ("Couldn't generate a full styling idea for this one — but it's a versatile piece worth grabbing."); flow continues, agent never crashes. |
+| create_fit_card (Step 5) | `outfit` empty/missing (tests / M5 only) | Tool returns a descriptive error string ("No outfit to caption yet — generate a styling idea first."), does not call the LLM, does not raise. |
+| create_fit_card (Step 5) | LLM returns empty / raises | Tool returns a safe fallback caption; flow completes. |
 
 ---
 
