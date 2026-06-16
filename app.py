@@ -17,17 +17,20 @@ import gradio as gr
 from agent import run_agent
 from tools import _format_price
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+from utils.profile import load_profile, save_profile
 
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(user_query: str, wardrobe_choice: str, style_note: str = "") -> tuple[str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
     Args:
         user_query:     The text the user typed into the search box.
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
+        style_note:      Optional free-text style preference (Stretch 4), threaded
+                          into suggest_outfit's prompt when non-empty.
 
     Returns:
         A tuple of three strings:
@@ -56,7 +59,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     )
 
     # 3. Run the agent.
-    session = run_agent(user_query, wardrobe)
+    session = run_agent(user_query, wardrobe, style_note.strip() or None)
 
     # 4. Error path: show the message in panel 1, leave the others empty.
     if session["error"]:
@@ -95,6 +98,12 @@ EXAMPLE_QUERIES = [
 ]
 
 def build_interface():
+    # Stretch 4: load any saved profile once at build time to prefill the UI.
+    # A fresh clone has no file yet, so this is None and the UI just shows its defaults.
+    saved_profile = load_profile()
+    initial_wardrobe = (saved_profile or {}).get("wardrobe_choice", "Example wardrobe")
+    initial_note = (saved_profile or {}).get("style_note", "")
+
     with gr.Blocks(title="FitFindr") as demo:
         gr.Markdown("""
 # FitFindr 🛍️
@@ -111,10 +120,22 @@ Describe what you're looking for — include size and price if you want to filte
             )
             wardrobe_choice = gr.Radio(
                 choices=["Example wardrobe", "Empty wardrobe (new user)"],
-                value="Example wardrobe",
+                value=initial_wardrobe,
                 label="Wardrobe",
                 scale=1,
             )
+
+        with gr.Row():
+            style_note_input = gr.Textbox(
+                label="Style note (optional)",
+                placeholder="e.g. I like y2k and grunge",
+                value=initial_note,
+                lines=1,
+                scale=3,
+            )
+            save_profile_btn = gr.Button("Save my style profile", scale=1)
+
+        save_status = gr.Markdown(visible=False)
 
         submit_btn = gr.Button("Find it", variant="primary")
 
@@ -143,13 +164,21 @@ Describe what you're looking for — include size and price if you want to filte
 
         submit_btn.click(
             fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
+            inputs=[query_input, wardrobe_choice, style_note_input],
             outputs=[listing_output, outfit_output, fitcard_output],
         )
         query_input.submit(
             fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
+            inputs=[query_input, wardrobe_choice, style_note_input],
             outputs=[listing_output, outfit_output, fitcard_output],
+        )
+        save_profile_btn.click(
+            fn=lambda wc, note: (
+                save_profile({"wardrobe_choice": wc, "style_note": note}),
+                gr.Markdown(value="Saved.", visible=True),
+            )[1],
+            inputs=[wardrobe_choice, style_note_input],
+            outputs=[save_status],
         )
 
     return demo

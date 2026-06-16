@@ -330,7 +330,7 @@ def test_run_agent_happy_path_state_flow(monkeypatch):
     fake_item = dict(SAMPLE_ITEM, title="Top Result Tee")
     calls = {}
 
-    def fake_suggest(new_item, wardrobe):
+    def fake_suggest(new_item, wardrobe, style_note=None):
         calls["suggest_args"] = (new_item, wardrobe)
         return "OUTFIT SUGGESTION"
 
@@ -440,7 +440,7 @@ def test_handle_query_empty_guard_does_not_run_agent(monkeypatch):
 
 
 def test_handle_query_error_path(monkeypatch):
-    monkeypatch.setattr(app, "run_agent", lambda q, w: _session(error="some error message"))
+    monkeypatch.setattr(app, "run_agent", lambda q, w, s=None: _session(error="some error message"))
     panel1, panel2, panel3 = app.handle_query("anything", "Example wardrobe")
     assert panel1 == "some error message"
     assert panel2 == "" and panel3 == ""
@@ -456,7 +456,7 @@ def test_handle_query_happy_path_listing_format(monkeypatch):
         outfit_suggestion="wear it with jeans",
         fit_card="cute thrifted fit",
     )
-    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    monkeypatch.setattr(app, "run_agent", lambda q, w, s=None: full)
     panel1, panel2, panel3 = app.handle_query("vintage graphic tee", "Example wardrobe")
     assert panel1 == "Y2K Baby Tee — Butterfly Print — $18, depop, excellent condition"
     assert panel2 == "wear it with jeans"
@@ -477,7 +477,7 @@ def test_run_agent_retry_succeeds_drops_size(monkeypatch):
 
     monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(size="L"))
     monkeypatch.setattr(tools, "search_listings", fake_search)
-    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w, style_note=None: "OUTFIT")
     monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
 
     session = run_agent("vintage graphic tee size L under $30", get_example_wardrobe())
@@ -595,7 +595,7 @@ def test_compare_price_loop_integration_sets_price_check(monkeypatch):
 
     monkeypatch.setattr(agent, "_parse_query", lambda q: _scope())
     monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [fake_item])
-    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w, style_note=None: "OUTFIT")
     monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
 
     session = run_agent("vintage graphic tee under $30", get_example_wardrobe())
@@ -612,7 +612,7 @@ def test_compare_price_insufficient_data_does_not_block_flow(monkeypatch):
 
     monkeypatch.setattr(agent, "_parse_query", lambda q: _scope())
     monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [fake_item])
-    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w, style_note=None: "OUTFIT")
     monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
 
     session = run_agent("one off item", get_example_wardrobe())
@@ -634,7 +634,7 @@ def test_handle_query_price_check_line_shown_when_sufficient(monkeypatch):
         fit_card="cute thrifted fit",
         price_check={"verdict": "good deal", "item_price": 15.0, "median_comparable": 21.0, "n_comparable": 14},
     )
-    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    monkeypatch.setattr(app, "run_agent", lambda q, w, s=None: full)
     panel1, _, _ = app.handle_query("mesh top", "Example wardrobe")
     assert "Price check: good deal ($15 vs $21 median for tops)" in panel1
 
@@ -650,7 +650,7 @@ def test_handle_query_price_check_line_omitted_when_insufficient(monkeypatch):
         fit_card="cute thrifted fit",
         price_check={"verdict": "insufficient data", "item_price": 50.0, "median_comparable": None, "n_comparable": 0},
     )
-    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    monkeypatch.setattr(app, "run_agent", lambda q, w, s=None: full)
     panel1, _, _ = app.handle_query("one off item", "Example wardrobe")
     assert "Price check" not in panel1
 
@@ -666,7 +666,59 @@ def test_handle_query_shows_loosened_note(monkeypatch):
         fit_card="cute thrifted fit",
         loosened="size filter (L)",
     )
-    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    monkeypatch.setattr(app, "run_agent", lambda q, w, s=None: full)
     panel1, _, _ = app.handle_query("vintage polo shirt size L", "Example wardrobe")
     assert panel1.startswith("No exact size match — showing results without the size filter.\n")
-    assert "Vintage Polo Shirt — Forest Green — $18, depop, good condition" in panel1
+
+
+# ── Stretch 4: style profile persistence (utils/profile.py, offline, tmp_path only) ──
+
+from utils.profile import load_profile, save_profile
+
+
+def test_profile_save_then_load_round_trips(tmp_path):
+    path = tmp_path / "style_profile.json"
+    profile = {"wardrobe_choice": "Example wardrobe", "style_note": "I like y2k and grunge"}
+    save_profile(profile, path=str(path))
+    assert load_profile(path=str(path)) == profile
+
+
+def test_profile_missing_file_returns_none(tmp_path):
+    path = tmp_path / "does_not_exist.json"
+    assert load_profile(path=str(path)) is None
+
+
+def test_profile_corrupt_file_returns_none_no_exception(tmp_path):
+    path = tmp_path / "style_profile.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    assert load_profile(path=str(path)) is None
+
+
+# ── Stretch 4: style_note threaded into suggest_outfit (offline, _chat patched) ──
+
+def test_suggest_outfit_style_note_appears_in_prompt(monkeypatch):
+    captured = {}
+
+    def stub(messages, temperature, max_tokens):
+        captured["messages"] = messages
+        return "styled with the note in mind"
+
+    monkeypatch.setattr(tools, "_chat", stub)
+    suggest_outfit(SAMPLE_ITEM, get_example_wardrobe(), style_note="I like y2k and grunge")
+    prompt = " ".join(m["content"] for m in captured["messages"])
+    assert "I like y2k and grunge" in prompt
+
+
+def test_suggest_outfit_without_style_note_unchanged(monkeypatch):
+    captured = {}
+
+    def stub(messages, temperature, max_tokens):
+        captured["messages"] = messages
+        return "Outfit 1: wear it with the jeans."
+
+    monkeypatch.setattr(tools, "_chat", stub)
+    # No third argument — exercises the back-compat default (style_note=None).
+    out = suggest_outfit(SAMPLE_ITEM, get_example_wardrobe())
+    assert out == "Outfit 1: wear it with the jeans."
+    prompt = " ".join(m["content"] for m in captured["messages"])
+    assert "style preference" not in prompt

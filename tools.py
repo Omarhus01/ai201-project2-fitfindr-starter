@@ -224,7 +224,7 @@ def search_listings(
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def suggest_outfit(new_item: dict, wardrobe: dict, style_note: str | None = None) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
@@ -232,6 +232,9 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         new_item: A listing dict (the item the user is considering buying).
         wardrobe: A wardrobe dict with an 'items' key containing a list of
                   wardrobe item dicts. May be empty — handle this gracefully.
+        style_note: Optional free-text style preference from the user's saved
+                  profile (Stretch 4), e.g. "I like y2k and grunge". None by
+                  default — every existing caller keeps working unchanged.
 
     Returns:
         A non-empty string with outfit suggestions.
@@ -269,12 +272,15 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     item_desc = _format_new_item(new_item)
 
+    # Stretch 4: optional style-preference context from the user's saved profile.
+    note_line = f"\nThe shopper's stated style preference: {style_note}\n" if style_note else ""
+
     if not items:
         # General-styling path. The anchor phrase below is asserted by the routing test.
         user_msg = {
             "role": "user",
             "content": (
-                f"Here is a thrifted item:\n{item_desc}\n\n"
+                f"Here is a thrifted item:\n{item_desc}\n{note_line}\n"
                 "Note: the shopper hasn't added any wardrobe items yet, so do not invent "
                 "or name pieces they own. Give general styling advice for this item — what "
                 "kinds of pieces pair well with it, what colors work, and what overall vibe "
@@ -287,7 +293,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         user_msg = {
             "role": "user",
             "content": (
-                f"Here is a thrifted item:\n{item_desc}\n\n"
+                f"Here is a thrifted item:\n{item_desc}\n{note_line}\n"
                 f"Here is the shopper's current wardrobe:\n{wardrobe_desc}\n\n"
                 "Suggest 1-2 complete outfits built around the thrifted item, naming "
                 "specific wardrobe pieces by their exact names. Keep it to short, readable "

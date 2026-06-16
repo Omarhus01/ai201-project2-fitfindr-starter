@@ -1,6 +1,9 @@
 # API keys — never commit these
 .env
 
+# Stretch 4 — user-specific style profile, not project data
+data/style_profile.json
+
 # Python
 __pycache__/
 *.py[cod]

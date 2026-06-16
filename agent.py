@@ -146,7 +146,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
 
 # ── planning loop ─────────────────────────────────────────────────────────────
 
-def run_agent(query: str, wardrobe: dict) -> dict:
+def run_agent(query: str, wardrobe: dict, style_note: str | None = None) -> dict:
     """
     Main agent entry point. Runs the FitFindr planning loop for a single
     user interaction and returns the completed session dict.
@@ -156,6 +156,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                   (e.g., "vintage graphic tee under $30, size M")
         wardrobe: User's wardrobe dict — use get_example_wardrobe() or
                   get_empty_wardrobe() from utils/data_loader.py
+        style_note: Optional free-text style preference from a saved profile
+                  (Stretch 4), threaded through to suggest_outfit. None by
+                  default — every existing call site keeps working unchanged.
 
     Returns:
         The session dict after the interaction completes. Check session["error"]
@@ -270,8 +273,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     session["price_check"] = tools.compare_price(session["selected_item"])
 
     # Step 4 — suggest an outfit (no early return; the tool self-handles failures).
+    # style_note (Stretch 4) rides along as optional extra context — no new branch.
     session["outfit_suggestion"] = tools.suggest_outfit(
-        session["selected_item"], session["wardrobe"]
+        session["selected_item"], session["wardrobe"], style_note
     )
 
     # Step 5 — create the fit card (no early return).

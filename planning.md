@@ -546,6 +546,70 @@ Steps 4/5 and rejoins only at the `app.py` formatting step, never gating Steps 4
 
 ---
 
+### Stretch 4 — Style profile memory
+
+**What it does:** persists a user's style profile across sessions so they don't have to
+re-pick their wardrobe and re-describe their style every time they open the app. On app
+start, if a saved profile exists, it's loaded and used to prefill the UI; the user can save
+their current choices as their profile with a button click.
+
+**Scope decision (kept deliberately small and demo-able):** the profile stores exactly two
+things — the chosen wardrobe (`"Example wardrobe"` or `"Empty wardrobe (new user)"`) and an
+optional free-text style note (e.g. `"I like y2k and grunge"`). It does NOT store full
+wardrobe contents, search history, or multiple named profiles. This is a single-user,
+single-file profile — no accounts, no login — which is enough to demonstrate real
+cross-session memory on camera without building auth or a database.
+
+**Storage decision:** a single JSON file at `data/style_profile.json`. I'm gitignoring this
+file (added to `.gitignore` alongside `.env`) rather than committing a default version,
+because it's user-specific state, not project data — the same reason `.env` isn't committed.
+`load_profile()` returns `None` when the file doesn't exist, so a fresh clone works
+out of the box with no profile present; the UI just shows its defaults (Example wardrobe, no
+note) until the user saves one.
+
+**Functions — new module `utils/profile.py`** (kept separate from `tools.py`; this isn't an
+agent tool, it's a persistence helper the UI calls directly):
+- `load_profile() -> dict | None` — reads `data/style_profile.json`. Returns `None` if the
+  file doesn't exist OR contains invalid JSON. Never raises.
+- `save_profile(profile: dict) -> None` — writes `profile` to `data/style_profile.json` as
+  JSON (creating the `data/` dir if needed). The dict shape: `{"wardrobe_choice": str,
+  "style_note": str}`.
+
+**UI integration (`app.py`):**
+- A "Save my style profile" button and a free-text "Style note" textbox, alongside the
+  existing wardrobe radio.
+- On save: `save_profile({"wardrobe_choice": <radio value>, "style_note": <note text>})`.
+- On app load: call `load_profile()` once when building the interface; if it returns a
+  profile, set the radio's and the note box's initial `value` from it. If it returns `None`
+  (fresh clone, no profile saved yet), the UI just shows its existing defaults.
+- The style note, if non-empty, is threaded into `suggest_outfit`'s prompt as extra context
+  so suggestions reflect it (e.g. "I like y2k and grunge" nudges the LLM's outfit framing).
+
+**Loop change — additive, no new failure branch:** `run_agent` gains one new **optional**
+parameter, `style_note: str | None = None`, defaulting to `None` so every existing call site
+and test that calls `run_agent(query, wardrobe)` keeps working unchanged. When provided, it's
+passed straight through to `suggest_outfit` as a third, **optional** parameter
+(`style_note: str | None = None`) — same back-compat rule applies there: every existing call
+to `suggest_outfit(item, wardrobe)` with no third argument behaves exactly as before. This
+adds no branch to the loop's control flow; it's an extra piece of context riding alongside
+the existing Step 4 call, not a new step.
+
+**Demo plan (for the video):** in one run, type a style note and click "Save my style
+profile." Then simulate a fresh session by reloading the page (or restarting the app) and
+show the wardrobe radio and style note pre-filled from the saved file, and a suggestion that
+visibly reflects the note (e.g. it should reference "grunge" or "y2k" if that's what was
+saved). That before/after is what makes cross-session memory readable on camera, since a
+single screen recording can't show two separate Python process lifetimes any other way.
+
+**What happens if it fails:** a missing or corrupted profile file is not an error condition
+— `load_profile()` returns `None` and the UI just falls back to its hardcoded defaults
+exactly as if no profile feature existed. `save_profile()` writing to disk is the only
+side-effecting step in the whole feature; if it can't write (e.g. read-only filesystem) that
+exception is allowed to surface in the UI as a Gradio error, since silently pretending a save
+succeeded when it didn't would be worse than a visible failure.
+
+---
+
 ## A Complete Interaction (Step by Step)
 
 Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
