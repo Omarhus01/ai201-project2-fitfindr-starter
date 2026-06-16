@@ -298,3 +298,119 @@ def test_parse_service_error_is_not_valueerror(monkeypatch):
     with pytest.raises(Exception) as excinfo:
         agent._parse_query("x")
     assert not isinstance(excinfo.value, ValueError)  # must stay distinguishable from 1a
+
+
+# ── run_agent (loop-branching layer — patch agent._parse_query + tools.* — offline) ─
+
+from agent import run_agent
+
+ONE_A = (
+    "I couldn't read that request — try naming an item, a size, or a price, "
+    "e.g. 'vintage denim jacket size M under $40.'"
+)
+SERVICE_ERROR = (
+    "FitFindr is having trouble reaching its service right now — "
+    "please try again in a moment."
+)
+ONE_B = (
+    "FitFindr only helps find and style secondhand clothing. Tell me what you're "
+    "after — for example, 'vintage denim jacket, size M, under $40' — and I'll dig "
+    "something up."
+)
+
+
+def _scope(in_scope=True, description="vintage graphic tee", size=None, max_price=30.0):
+    return {
+        "description": description, "size": size,
+        "max_price": max_price, "in_scope": in_scope,
+    }
+
+
+def test_run_agent_happy_path_state_flow(monkeypatch):
+    fake_item = dict(SAMPLE_ITEM, title="Top Result Tee")
+    calls = {}
+
+    def fake_suggest(new_item, wardrobe):
+        calls["suggest_args"] = (new_item, wardrobe)
+        return "OUTFIT SUGGESTION"
+
+    def fake_card(outfit, new_item):
+        calls["card_args"] = (outfit, new_item)
+        return "FIT CARD"
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope())
+    monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [fake_item])
+    monkeypatch.setattr(tools, "suggest_outfit", fake_suggest)
+    monkeypatch.setattr(tools, "create_fit_card", fake_card)
+
+    wardrobe = {"items": [{"name": "thing"}]}
+    session = run_agent("vintage graphic tee under $30", wardrobe)
+
+    # All keys populated, no error, both LLM tools were called.
+    assert session["error"] is None
+    assert session["selected_item"] is fake_item
+    assert session["outfit_suggestion"] == "OUTFIT SUGGESTION"
+    assert session["fit_card"] == "FIT CARD"
+    assert "suggest_args" in calls and "card_args" in calls
+
+    # State-identity (`is`, not ==): the exact objects flowed through, no re-entry.
+    assert calls["suggest_args"][0] is session["selected_item"]
+    assert calls["suggest_args"][1] is session["wardrobe"]
+    assert calls["card_args"][0] is session["outfit_suggestion"]
+    assert calls["card_args"][1] is session["selected_item"]
+
+
+def test_run_agent_no_results_does_not_call_suggest(monkeypatch):
+    def sentinel(*args, **kwargs):
+        pytest.fail("suggest_outfit/create_fit_card must NOT be called on no-results")
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(description="designer ballgown"))
+    monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [])
+    monkeypatch.setattr(tools, "suggest_outfit", sentinel)
+    monkeypatch.setattr(tools, "create_fit_card", sentinel)
+
+    session = run_agent("designer ballgown under $30", get_example_wardrobe())
+
+    assert session["error"] is not None
+    assert "designer ballgown" in session["error"]
+    assert "Try removing" in session["error"]
+    assert session["search_results"] == []
+    assert session["selected_item"] is None
+    assert session["outfit_suggestion"] is None
+    assert session["fit_card"] is None
+
+
+def test_run_agent_out_of_scope_never_searches(monkeypatch):
+    def sentinel(*args, **kwargs):
+        pytest.fail("search_listings must NOT be called when out of scope")
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(in_scope=False, description=""))
+    monkeypatch.setattr(tools, "search_listings", sentinel)
+
+    session = run_agent("what's the capital of France", get_example_wardrobe())
+    assert session["error"] == ONE_B
+    assert session["search_results"] == []
+    assert session["fit_card"] is None
+
+
+def test_run_agent_parse_fail_is_1a(monkeypatch):
+    def boom(q):
+        raise ValueError("bad json")
+
+    monkeypatch.setattr(agent, "_parse_query", boom)
+    monkeypatch.setattr(
+        tools, "search_listings",
+        lambda *a, **k: pytest.fail("no tools on parse failure"),
+    )
+    session = run_agent("???", get_example_wardrobe())
+    assert session["error"] == ONE_A
+
+
+def test_run_agent_service_error_distinct_from_1a(monkeypatch):
+    def boom(q):
+        raise ConnectionError("groq down")
+
+    monkeypatch.setattr(agent, "_parse_query", boom)
+    session = run_agent("vintage tee", get_example_wardrobe())
+    assert session["error"] == SERVICE_ERROR
+    assert session["error"] != ONE_A

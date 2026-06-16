@@ -189,9 +189,74 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 0 — initialize.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 1 — parse + scope gate. Wrap ONLY the parser call.
+    try:
+        parsed = _parse_query(query)
+    except ValueError:
+        # Bad JSON / missing keys / wrong types → 1a "couldn't read that".
+        session["error"] = (
+            "I couldn't read that request — try naming an item, a size, or a price, "
+            "e.g. 'vintage denim jacket size M under $40.'"
+        )
+        return session
+    except Exception:
+        # Groq API / connection / timeout → service error. NOTE: this except is broad
+        # and will also surface genuine bugs as "service trouble" — a conscious scope
+        # choice (the parser is the only step wrapped here).
+        session["error"] = (
+            "FitFindr is having trouble reaching its service right now — "
+            "please try again in a moment."
+        )
+        return session
+
+    # Scope gate (1b): off-topic / distressing input is declined with a single warm
+    # redirect and never reaches the styling LLM.
+    if not parsed["in_scope"]:
+        session["error"] = (
+            "FitFindr only helps find and style secondhand clothing. Tell me what you're "
+            "after — for example, 'vintage denim jacket, size M, under $40' — and I'll dig "
+            "something up."
+        )
+        return session
+
+    session["parsed"] = parsed
+
+    # Step 2 — search (pure function).
+    results = tools.search_listings(
+        parsed["description"], parsed["size"], parsed["max_price"]
+    )
+    session["search_results"] = results
+
+    # Branch 2a — no results: stop here, do NOT call suggest_outfit.
+    if results == []:
+        size = parsed["size"]
+        max_price = parsed["max_price"]
+        session["error"] = (
+            f"No listings matched '{parsed['description']}'"
+            + (f" in size {size}" if size else "")
+            + (f" under {tools._format_price(max_price)}" if max_price is not None else "")
+            + ". Try removing the size filter, raising your max price, or searching for a "
+            "different item."
+        )
+        return session
+
+    # Step 3 — select the top result.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 4 — suggest an outfit (no early return; the tool self-handles failures).
+    session["outfit_suggestion"] = tools.suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 5 — create the fit card (no early return).
+    session["fit_card"] = tools.create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 6 — return the completed session.
     return session
 
 
