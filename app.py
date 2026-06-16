@@ -71,6 +71,16 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     # Stretch 1: tell the user when the size filter was dropped to find this result.
     if session.get("loosened"):
         listing_text = "No exact size match — showing results without the size filter.\n" + listing_text
+
+    # Stretch 2: append the price-check line, but only when there's enough data to back it.
+    price_check = session.get("price_check")
+    if price_check and price_check["verdict"] != "insufficient data":
+        listing_text += (
+            f"\nPrice check: {price_check['verdict']} "
+            f"({_format_price(price_check['item_price'])} vs "
+            f"{_format_price(price_check['median_comparable'])} median for {item['category']})"
+        )
+
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 

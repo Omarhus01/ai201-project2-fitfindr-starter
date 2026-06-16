@@ -8,7 +8,7 @@ search_listings is a pure function over local JSON with no LLM and no network.
 import pytest
 
 import tools
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, compare_price
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 FIT_CARD_EMPTY_GUARD = "No outfit to caption yet — generate a styling idea first."
@@ -425,7 +425,7 @@ def _session(**overrides):
     base = {
         "query": "", "parsed": {}, "search_results": [], "selected_item": None,
         "wardrobe": {}, "outfit_suggestion": None, "fit_card": None, "error": None,
-        "loosened": None,
+        "loosened": None, "price_check": None,
     }
     base.update(overrides)
     return base
@@ -529,6 +529,131 @@ def test_run_agent_no_size_does_not_retry(monkeypatch):
 
 
 # ── Stretch 1: loosened note surfaces in app.py's listing panel ──────────────────
+
+# ── Stretch 2: compare_price (4th tool, pure function, no network) ───────────────
+
+def _real_item(title_substring):
+    for listing in tools.load_listings():
+        if title_substring in listing["title"]:
+            return listing
+    raise AssertionError(f"no listing found containing {title_substring!r}")
+
+
+def test_compare_price_good_deal_real_data():
+    # Mesh Long-Sleeve Top: $15 vs the OTHER 14 tops' median $21.5 (-30.2%) — well below
+    # threshold. The comparable set excludes the item itself, so the median is taken over
+    # the other 14 tops, not all 15.
+    item = _real_item("Mesh Long-Sleeve Top")
+    result = compare_price(item)
+    assert result["verdict"] == "good deal"
+    assert result["item_price"] == 15.0
+    assert result["median_comparable"] == 21.5
+    assert result["n_comparable"] == 14  # 15 tops minus the item itself
+
+
+def test_compare_price_high_real_data():
+    # Knit Cardigan: $35 vs the other 14 tops' median $20.5 (+70.7%) — well above threshold.
+    item = _real_item("Knit Cardigan")
+    result = compare_price(item)
+    assert result["verdict"] == "high"
+    assert result["item_price"] == 35.0
+    assert result["median_comparable"] == 20.5
+
+
+def test_compare_price_fair_real_data():
+    # Vintage Band Tee: $19 vs the other 14 tops' median $21.5 (-11.6%) — inside the band.
+    item = _real_item("Vintage Band Tee")
+    result = compare_price(item)
+    assert result["verdict"] == "fair"
+    assert result["item_price"] == 19.0
+    assert result["median_comparable"] == 21.5
+
+
+def test_compare_price_insufficient_data_few_comparables(monkeypatch):
+    fake_listings = [
+        {"id": "a", "category": "hats", "price": 10.0},
+        {"id": "b", "category": "tops", "price": 20.0},
+    ]
+    monkeypatch.setattr(tools, "load_listings", lambda: fake_listings)
+    item = {"id": "a", "category": "hats", "price": 10.0}  # only 1 in category, 0 comparables
+    result = compare_price(item)
+    assert result["verdict"] == "insufficient data"
+    assert result["n_comparable"] == 0
+    assert result["median_comparable"] is None
+    assert result["item_price"] == 10.0
+
+
+def test_compare_price_never_raises_on_bad_input():
+    for bad in ({}, {"category": "tops"}, {"price": "not a number", "category": "tops"},
+                {"price": None, "category": "tops"}, None, "not a dict", 42):
+        result = compare_price(bad)
+        assert result["verdict"] == "insufficient data"
+
+
+def test_compare_price_loop_integration_sets_price_check(monkeypatch):
+    fake_item = dict(SAMPLE_ITEM)
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope())
+    monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [fake_item])
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
+
+    session = run_agent("vintage graphic tee under $30", get_example_wardrobe())
+
+    assert session["price_check"] is not None
+    assert session["price_check"]["verdict"] in {"good deal", "fair", "high", "insufficient data"}
+    # non-blocking: the rest of the flow still completed regardless of the verdict
+    assert session["outfit_suggestion"] == "OUTFIT"
+    assert session["fit_card"] == "CARD"
+
+
+def test_compare_price_insufficient_data_does_not_block_flow(monkeypatch):
+    fake_item = {"id": "lst_unique", "title": "One-Off Item", "category": "one_of_a_kind", "price": 50.0}
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope())
+    monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [fake_item])
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
+
+    session = run_agent("one off item", get_example_wardrobe())
+
+    assert session["price_check"]["verdict"] == "insufficient data"
+    assert session["error"] is None
+    assert session["outfit_suggestion"] == "OUTFIT"
+    assert session["fit_card"] == "CARD"
+
+
+def test_handle_query_price_check_line_shown_when_sufficient(monkeypatch):
+    item = {
+        "title": "Mesh Long-Sleeve Top", "price": 15.0,
+        "platform": "depop", "condition": "good", "category": "tops",
+    }
+    full = _session(
+        selected_item=item,
+        outfit_suggestion="wear it with jeans",
+        fit_card="cute thrifted fit",
+        price_check={"verdict": "good deal", "item_price": 15.0, "median_comparable": 21.0, "n_comparable": 14},
+    )
+    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    panel1, _, _ = app.handle_query("mesh top", "Example wardrobe")
+    assert "Price check: good deal ($15 vs $21 median for tops)" in panel1
+
+
+def test_handle_query_price_check_line_omitted_when_insufficient(monkeypatch):
+    item = {
+        "title": "One-Off Item", "price": 50.0,
+        "platform": "depop", "condition": "good", "category": "one_of_a_kind",
+    }
+    full = _session(
+        selected_item=item,
+        outfit_suggestion="wear it with jeans",
+        fit_card="cute thrifted fit",
+        price_check={"verdict": "insufficient data", "item_price": 50.0, "median_comparable": None, "n_comparable": 0},
+    )
+    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    panel1, _, _ = app.handle_query("one off item", "Example wardrobe")
+    assert "Price check" not in panel1
+
 
 def test_handle_query_shows_loosened_note(monkeypatch):
     item = {

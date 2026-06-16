@@ -14,6 +14,7 @@ Tools:
 
 import os
 import re
+import statistics
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -383,3 +384,80 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     if not result or not result.strip():
         return fallback
     return result.strip()
+
+
+# ── Tool 4 (Stretch 2): compare_price ───────────────────────────────────────────
+
+_PRICE_DEAL_THRESHOLD = 0.15  # 15% below/above the category median
+
+
+def _insufficient_data(item_price: float | None = None) -> dict:
+    return {
+        "verdict": "insufficient data",
+        "item_price": item_price,
+        "median_comparable": None,
+        "n_comparable": 0,
+    }
+
+
+def compare_price(item: dict) -> dict:
+    """
+    Estimate whether a listing's price is a good deal, fair, or high relative to
+    comparable listings (same category, excluding the item itself) in the dataset.
+
+    Args:
+        item: A listing dict (normally session["selected_item"]). Only `category`,
+              `id`, and `price` are read.
+
+    Returns:
+        dict with keys: verdict ("good deal" | "fair" | "high" | "insufficient data"),
+        item_price (float | None), median_comparable (float | None), n_comparable (int).
+        Never raises — missing/invalid fields fall back to "insufficient data".
+
+    TODO:
+        1. Defensively read category/id/price off `item`; bail to insufficient data
+           if price isn't a usable number.
+        2. Load all listings, find every other listing with the same category
+           (excluding the item by id).
+        3. If fewer than 2 comparables, return insufficient data.
+        4. Otherwise compute the median comparable price and the item's percent
+           deviation from it; classify against the +/-15% threshold.
+    """
+    if not isinstance(item, dict):
+        return _insufficient_data()
+
+    item_price = item.get("price")
+    if isinstance(item_price, bool) or not isinstance(item_price, (int, float)):
+        return _insufficient_data()
+    item_price = float(item_price)
+
+    category = item.get("category")
+    if not category:
+        return _insufficient_data(item_price)
+
+    item_id = item.get("id")
+    comparables = [
+        listing["price"]
+        for listing in load_listings()
+        if listing.get("category") == category and listing.get("id") != item_id
+    ]
+
+    if len(comparables) < 2:
+        return _insufficient_data(item_price)
+
+    median_comparable = statistics.median(comparables)
+    pct = (item_price - median_comparable) / median_comparable
+
+    if pct <= -_PRICE_DEAL_THRESHOLD:
+        verdict = "good deal"
+    elif pct >= _PRICE_DEAL_THRESHOLD:
+        verdict = "high"
+    else:
+        verdict = "fair"
+
+    return {
+        "verdict": verdict,
+        "item_price": item_price,
+        "median_comparable": median_comparable,
+        "n_comparable": len(comparables),
+    }

@@ -345,17 +345,20 @@ flowchart TD
     S -->|"results == [] AND size is None (nothing to loosen)"| ERR
     S -->|"results = [...] → session.search_results"| SEL["Step 3: session.selected_item = search_results[0]"]
     SEL --> SO["Step 4: suggest_outfit(selected_item, wardrobe) — LLM<br/>empty wardrobe → general-advice fallback<br/>→ session.outfit_suggestion"]
+    SEL -.->|"Stretch 2: non-blocking enrichment, doesn't gate Step 4/5"| PC["compare_price(selected_item) — pure fn, no LLM<br/>→ session.price_check"]
+    PC -.-> APP
     SO --> FC["Step 5: create_fit_card(outfit_suggestion, selected_item) — LLM (temp ~0.9)<br/>→ session.fit_card"]
     FC --> RET["Step 6: return session"]
     ERR --> RET
     RET --> APP{"app.py handle_query:<br/>error set?"}
     APP -->|"yes"| EP["panel 1 = error<br/>panels 2 and 3 empty"]
-    APP -->|"no"| OP["panel 1 = selected_item<br/>panel 2 = outfit<br/>panel 3 = fit_card"]
+    APP -->|"no"| OP["panel 1 = selected_item + price_check line (if not insufficient data)<br/>panel 2 = outfit<br/>panel 3 = fit_card"]
 ```
 
 **SESSION** (single source of truth, `_new_session`): `query · parsed · search_results ·
-selected_item · wardrobe · outfit_suggestion · fit_card · error`. Every tool reads its
-inputs from `session` and writes its output back to `session`; the three error branches
+selected_item · wardrobe · outfit_suggestion · fit_card · error · loosened · price_check`.
+Every tool reads its inputs from `session` and writes its output back to `session`; the
+three error branches
 (1a, 1b, 2a) all set `session.error` and short-circuit to the return.
 
 ---
@@ -468,6 +471,78 @@ must be told what was adjusted, and the listing panel is the first thing they re
 **Updated architecture:** the 2a branch in the diagram above now shows the retry: an empty
 first result with a size set goes to the retry node, which either rejoins the happy path
 (with `loosened` set) or falls through to the same error sink as before.
+
+---
+
+### Stretch 2 — compare_price (4th tool)
+
+**What it does:** given the selected item, estimates whether its price is a good deal, fair,
+or high by comparing it against the median price of comparable listings in the dataset. Pure
+Python over `load_listings()` — no LLM, no network, same discipline as Tool 1.
+
+**Signature:** `compare_price(item: dict) -> dict`
+
+**Input parameters:**
+- `item` (dict): a listing dict (normally `session["selected_item"]`). Only `category`,
+  `id`, and `price` are read; everything else is ignored.
+
+**"Comparable" definition (the one real design decision, pinned here):** every other listing
+in the dataset with the **same `category`** as `item`, **excluding the item itself** (matched
+by `id`, not by object identity, so it also works against a reconstructed/copied dict).
+Category is the only axis used — not style, not size — because it's the one field every
+listing has and where "comparable" has an unambiguous meaning (a $30 jacket isn't being
+judged against tees). If fewer than 2 comparables exist after excluding the item, there isn't
+enough data for a median to mean anything, so the tool returns an explicit "insufficient
+data" verdict rather than a number that looks confident but isn't.
+
+**What it returns:** `dict` with exactly these keys:
+- `"verdict"` (str): one of `"good deal"`, `"fair"`, `"high"`, `"insufficient data"`.
+- `"item_price"` (float | None): the item's price, or `None` if it couldn't be read.
+- `"median_comparable"` (float | None): median price of the comparable set, or `None` when
+  `verdict == "insufficient data"`.
+- `"n_comparable"` (int): how many comparables were found (0 or 1 → insufficient data).
+
+**Verdict thresholds (pinned):** let `pct = (item_price - median_comparable) / median_comparable`.
+- `pct <= -0.15` → `"good deal"` (at least 15% below the category median).
+- `pct >= 0.15` → `"high"` (at least 15% above).
+- otherwise → `"fair"`.
+- `n_comparable < 2` → `"insufficient data"`, short-circuits before computing `pct`.
+
+I checked this threshold against every real listing's category (see the M5-equivalent
+verification run in the README) before locking it — 15% cleanly separates the obvious
+cases (e.g. a tee at -28% reads as a good deal, one at -4% reads as fair) without flagging
+near-median items as deals.
+
+**What happens if it fails or returns nothing:** `item` missing/empty, missing `price`,
+missing `category`, or `price` not a number → treated the same as "not enough data":
+return `{"verdict": "insufficient data", "item_price": None, "median_comparable": None,
+"n_comparable": 0}`. Never raises — defensive `.get()` access throughout, same pattern as
+Tool 1.
+
+**Loop integration — additive, not a new branch.** `compare_price` runs once, right after
+Step 3 (select), as a **non-blocking enrichment**: `session["price_check"] =
+compare_price(session["selected_item"])`. It is not wrapped in a branch and never causes an
+early return — an "insufficient data" result is informational, not a failure, so the agent
+still calls `suggest_outfit` and `create_fit_card` exactly as before. This keeps the
+3-required-tool critical path (search → suggest → caption) the thing that can fail the
+interaction; the price check can only add information, never remove it.
+
+**New session key:** `price_check`, added to `_new_session()`, defaults to `None`. Updated
+State Management table:
+
+| Key | Set in | Value | Read by |
+|-----|--------|-------|---------|
+| `price_check` | Step 3 (enrichment, Stretch 2) | `dict` from `compare_price` (see above), or `None` before Step 3 runs | `app.py` — appended to the listing panel when verdict isn't "insufficient data" |
+
+**Where it surfaces:** `app.py`'s listing panel appends a line when `price_check` is present
+and its verdict isn't `"insufficient data"` — e.g. `"Price check: good deal ($18 vs $24
+median for tops)"` — reusing `_format_price` for both numbers. When data is insufficient, the
+line is omitted entirely rather than showing a verdict that isn't backed by enough
+comparables.
+
+**Updated architecture:** `compare_price` is drawn as a side branch off `selected_item` (Step
+3), not part of the main top-to-bottom critical path — it runs in parallel conceptually with
+Steps 4/5 and rejoins only at the `app.py` formatting step, never gating Steps 4 or 5.
 
 ---
 

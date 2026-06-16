@@ -140,6 +140,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
         "loosened": None,            # set to e.g. "size filter (M)" if Stretch 1 retried
+        "price_check": None,         # dict from compare_price (Stretch 2), non-blocking
     }
 
 
@@ -263,6 +264,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
     # Step 3 — select the top result.
     session["selected_item"] = session["search_results"][0]
+
+    # Stretch 2 — non-blocking price-check enrichment. Never gates the flow: an
+    # "insufficient data" result is informational, not a failure.
+    session["price_check"] = tools.compare_price(session["selected_item"])
 
     # Step 4 — suggest an outfit (no early return; the tool self-handles failures).
     session["outfit_suggestion"] = tools.suggest_outfit(
