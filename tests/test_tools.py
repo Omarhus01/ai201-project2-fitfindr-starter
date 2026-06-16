@@ -425,6 +425,7 @@ def _session(**overrides):
     base = {
         "query": "", "parsed": {}, "search_results": [], "selected_item": None,
         "wardrobe": {}, "outfit_suggestion": None, "fit_card": None, "error": None,
+        "loosened": None,
     }
     base.update(overrides)
     return base
@@ -460,3 +461,87 @@ def test_handle_query_happy_path_listing_format(monkeypatch):
     assert panel1 == "Y2K Baby Tee — Butterfly Print — $18, depop, excellent condition"
     assert panel2 == "wear it with jeans"
     assert panel3 == "cute thrifted fit"
+
+
+# ── Stretch 1: retry with loosened size filter (run_agent layer, offline) ────────
+
+def test_run_agent_retry_succeeds_drops_size(monkeypatch):
+    fake_item = dict(SAMPLE_ITEM, title="Found Without Size")
+    calls = []
+
+    def fake_search(description, size, max_price):
+        calls.append((description, size, max_price))
+        if size is not None:
+            return []
+        return [fake_item]
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(size="L"))
+    monkeypatch.setattr(tools, "search_listings", fake_search)
+    monkeypatch.setattr(tools, "suggest_outfit", lambda i, w: "OUTFIT")
+    monkeypatch.setattr(tools, "create_fit_card", lambda o, i: "CARD")
+
+    session = run_agent("vintage graphic tee size L under $30", get_example_wardrobe())
+
+    assert calls == [("vintage graphic tee", "L", 30.0), ("vintage graphic tee", None, 30.0)]
+    assert session["loosened"] == "size filter (L)"
+    assert session["error"] is None
+    assert session["selected_item"] is fake_item
+    assert session["outfit_suggestion"] == "OUTFIT"
+    assert session["fit_card"] == "CARD"
+
+
+def test_run_agent_retry_also_empty_errors_no_suggest(monkeypatch):
+    def sentinel(*args, **kwargs):
+        pytest.fail("suggest_outfit must NOT be called when both attempts are empty")
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(size="L"))
+    monkeypatch.setattr(tools, "search_listings", lambda d, s, m: [])
+    monkeypatch.setattr(tools, "suggest_outfit", sentinel)
+    monkeypatch.setattr(tools, "create_fit_card", sentinel)
+
+    session = run_agent("vintage graphic tee size L under $30", get_example_wardrobe())
+
+    assert session["error"] is not None
+    assert session["loosened"] is None
+    assert session["selected_item"] is None
+
+
+def test_run_agent_no_size_does_not_retry(monkeypatch):
+    calls = []
+
+    def fake_search(description, size, max_price):
+        calls.append((description, size, max_price))
+        return []
+
+    def sentinel(*args, **kwargs):
+        pytest.fail("suggest_outfit must NOT be called on no-results")
+
+    monkeypatch.setattr(agent, "_parse_query", lambda q: _scope(size=None))
+    monkeypatch.setattr(tools, "search_listings", fake_search)
+    monkeypatch.setattr(tools, "suggest_outfit", sentinel)
+    monkeypatch.setattr(tools, "create_fit_card", sentinel)
+
+    session = run_agent("designer ballgown under $30", get_example_wardrobe())
+
+    assert len(calls) == 1  # search_listings called ONCE — nothing to loosen
+    assert session["error"] is not None
+    assert session["loosened"] is None
+
+
+# ── Stretch 1: loosened note surfaces in app.py's listing panel ──────────────────
+
+def test_handle_query_shows_loosened_note(monkeypatch):
+    item = {
+        "title": "Vintage Polo Shirt — Forest Green", "price": 18.0,
+        "platform": "depop", "condition": "good",
+    }
+    full = _session(
+        selected_item=item,
+        outfit_suggestion="wear it with jeans",
+        fit_card="cute thrifted fit",
+        loosened="size filter (L)",
+    )
+    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    panel1, _, _ = app.handle_query("vintage polo shirt size L", "Example wardrobe")
+    assert panel1.startswith("No exact size match — showing results without the size filter.\n")
+    assert "Vintage Polo Shirt — Forest Green — $18, depop, good condition" in panel1

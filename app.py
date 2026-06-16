@@ -68,6 +68,9 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"{item['title']} — {_format_price(item['price'])}, "
         f"{item['platform']}, {item['condition']} condition"
     )
+    # Stretch 1: tell the user when the size filter was dropped to find this result.
+    if session.get("loosened"):
+        listing_text = "No exact size match — showing results without the size filter.\n" + listing_text
     return listing_text, session["outfit_suggestion"], session["fit_card"]
 
 

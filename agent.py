@@ -139,6 +139,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        "loosened": None,            # set to e.g. "size filter (M)" if Stretch 1 retried
     }
 
 
@@ -230,18 +231,35 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     )
     session["search_results"] = results
 
-    # Branch 2a — no results: stop here, do NOT call suggest_outfit.
+    # Branch 2a — no results. Stretch 1: if a size filter was the (only) thing that could
+    # have caused this, retry once with size dropped before giving up.
     if results == []:
         size = parsed["size"]
         max_price = parsed["max_price"]
-        session["error"] = (
-            f"No listings matched '{parsed['description']}'"
-            + (f" in size {size}" if size else "")
-            + (f" under {tools._format_price(max_price)}" if max_price is not None else "")
-            + ". Try removing the size filter, raising your max price, or searching for a "
-            "different item."
-        )
-        return session
+
+        if size is not None:
+            retry_results = tools.search_listings(parsed["description"], None, max_price)
+            if retry_results:
+                results = retry_results
+                session["search_results"] = results
+                session["loosened"] = f"size filter ({size})"
+            else:
+                session["error"] = (
+                    f"No listings matched '{parsed['description']}'"
+                    f" in size {size}"
+                    + (f" under {tools._format_price(max_price)}" if max_price is not None else "")
+                    + ". Try removing the size filter, raising your max price, or searching "
+                    "for a different item."
+                )
+                return session
+        else:
+            session["error"] = (
+                f"No listings matched '{parsed['description']}'"
+                + (f" under {tools._format_price(max_price)}" if max_price is not None else "")
+                + ". Try removing the size filter, raising your max price, or searching for a "
+                "different item."
+            )
+            return session
 
     # Step 3 — select the top result.
     session["selected_item"] = session["search_results"][0]

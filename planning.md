@@ -301,6 +301,7 @@ What's stored, when it's set, and what reads it next:
 | `outfit_suggestion` | Step 4 | styling string | Step 5 `create_fit_card` |
 | `fit_card` | Step 5 | caption string | `app.py` output panel |
 | `error` | any early-return branch | message string (else `None`) | `app.py` — checked FIRST |
+| `loosened` | Step 2 retry (Stretch 1) | short note e.g. `"size filter (M)"`, else `None` | `app.py` — prepended to the listing panel when set |
 
 State-flow guarantee for the demo: the `selected_item` set in Step 3 is the EXACT dict
 passed into both Step 4 and Step 5 — no re-entry, no reconstruction. This is what the demo
@@ -338,7 +339,10 @@ flowchart TD
     P -->|"1a: parse fail / bad JSON"| ERR[["session.error set<br/>(early return)"]]
     P -->|"1b: in_scope = false"| ERR
     P -->|"valid → session.parsed"| S["Step 2: search_listings(description, size, max_price)<br/>pure fn, no LLM"]
-    S -->|"2a: results == [] "| ERR
+    S -->|"results == [] AND size is not None"| RETRY["Stretch 1: retry search_listings(description, None, max_price)"]
+    RETRY -->|"retry also []"| ERR
+    RETRY -->|"retry found results → session.loosened = 'size filter (size)'"| SEL
+    S -->|"results == [] AND size is None (nothing to loosen)"| ERR
     S -->|"results = [...] → session.search_results"| SEL["Step 3: session.selected_item = search_results[0]"]
     SEL --> SO["Step 4: suggest_outfit(selected_item, wardrobe) — LLM<br/>empty wardrobe → general-advice fallback<br/>→ session.outfit_suggestion"]
     SO --> FC["Step 5: create_fit_card(outfit_suggestion, selected_item) — LLM (temp ~0.9)<br/>→ session.fit_card"]
@@ -415,6 +419,55 @@ that the selected_item set in Step 3 is the exact same dict handed to Steps 4 an
 print it to confirm), and that only the parser call is wrapped in try/except. Once the loop
 works I'll have it write handle_query() in app.py, which guards an empty query, calls
 run_agent(), reads error first, and maps the session into the three output panels.
+
+---
+
+## Stretch Features
+
+### Stretch 1 — Retry with fallback
+
+**What it does:** when `search_listings` returns `[]` AND a size filter was applied, the
+loop retries the search ONCE with `size` dropped (`description` and `max_price` kept). If
+the retry finds results, the loop proceeds normally and records that size was loosened so
+the user is told. If the retry is also empty, or there was no size to drop in the first
+place, the loop falls through to the existing 2a no-results error, unchanged.
+
+**Why size-only:** size is the most restrictive filter on this dataset (most categories have
+only one or two listings per size). Loosening `max_price` instead would show the user items
+above their stated budget, which is a worse surprise than showing the right item in the
+"wrong" labeled size — thrifted sizing is approximate anyway. Size-only is the cleaner, less
+surprising loosen, and it's exactly the example the stretch spec names ("e.g. remove size
+filter").
+
+**New session key:** `loosened`, added to `_new_session()`, defaults to `None`. Set to a
+short note like `"size filter (M)"` when the retry succeeds; stays `None` otherwise
+(including on the normal happy path with no retry). See the State Management table above for
+who sets/reads it.
+
+**Loop change (Step 2 / branch 2a), explicit conditional:**
+```python
+results = search_listings(desc, size, max_price)
+if results == []:
+    if size is not None:                      # only retry if size was a constraint at all
+        results = search_listings(desc, None, max_price)
+        if results:
+            session["loosened"] = f"size filter ({size})"
+        else:
+            session["error"] = <no-results>; return     # both attempts came back empty
+    else:
+        session["error"] = <no-results>; return         # nothing left to loosen
+# proceed with results (possibly from the loosened retry)
+```
+
+**Where it surfaces:** in `app.py`'s listing panel (Phase D format). When
+`session["loosened"]` is set, the panel gets a one-line note prepended before the listing
+string: `"No exact size match — showing results without the size filter.\n"`. This is
+deliberately not buried in a secondary field — the stretch spec is explicit that the user
+must be told what was adjusted, and the listing panel is the first thing they read.
+
+**Updated architecture:** the 2a branch in the diagram above now shows the retry: an empty
+first result with a size set goes to the retry node, which either rejoins the happy path
+(with `loosened` set) or falls through to the same error sink as before.
 
 ---
 
