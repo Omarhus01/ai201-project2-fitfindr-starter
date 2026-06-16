@@ -202,8 +202,9 @@ of temperature); optional `max_tokens` ceiling to hold the 2–4 sentence target
 **What happens if it fails or returns nothing:**
 - `outfit` empty/whitespace/missing → return a descriptive error **string** ("No outfit to
   caption yet — generate a styling idea first."); do **not** raise, do **not** call the LLM.
-- LLM returns empty → return a safe fallback caption string, never `""`.
-- LLM call raises → catch it, return a graceful fallback string, never propagate.
+- LLM returns empty / raises → catch it and return the safe fallback caption string
+  "Couldn't write a caption for this one right now — but it's a great find worth showing
+  off.", never `""`, never propagate.
 - `outfit`/item text is styled as content, never obeyed as instructions.
 
 ---
@@ -320,7 +321,7 @@ added because the loop depends on them.)
 | suggest_outfit (Step 4) | wardrobe is empty | NOT an error — the tool returns general styling advice for the item (what pairs well, what vibe it suits) instead of naming owned pieces. Flow continues to the fit card. |
 | suggest_outfit (Step 4) | LLM returns empty / raises | Tool returns a safe non-empty fallback ("Couldn't generate a full styling idea for this one — but it's a versatile piece worth grabbing."); flow continues, agent never crashes. |
 | create_fit_card (Step 5) | `outfit` empty/missing (tests / M5 only) | Tool returns a descriptive error string ("No outfit to caption yet — generate a styling idea first."), does not call the LLM, does not raise. |
-| create_fit_card (Step 5) | LLM returns empty / raises | Tool returns a safe fallback caption; flow completes. |
+| create_fit_card (Step 5) | LLM returns empty / raises | Tool returns the safe fallback caption "Couldn't write a caption for this one right now — but it's a great find worth showing off."; flow completes. |
 
 ---
 

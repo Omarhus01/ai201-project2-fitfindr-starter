@@ -5,9 +5,17 @@ Phase 1 covers Tool 1 (search_listings) only. Every test here is fully offline �
 search_listings is a pure function over local JSON with no LLM and no network.
 """
 
+import pytest
+
 import tools
-from tools import search_listings, suggest_outfit
+from tools import search_listings, suggest_outfit, create_fit_card
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+
+FIT_CARD_EMPTY_GUARD = "No outfit to caption yet — generate a styling idea first."
+FIT_CARD_FALLBACK = (
+    "Couldn't write a caption for this one right now — "
+    "but it's a great find worth showing off."
+)
 
 FALLBACK_2 = (
     "Couldn't generate a full styling idea for this one — "
@@ -170,3 +178,47 @@ def test_suggest_outfit_defensive_access_no_items_key(monkeypatch):
     # Wardrobe dict missing the "items" key must not raise (treated as empty).
     out = suggest_outfit(SAMPLE_ITEM, {"_note": "new user template"})
     assert isinstance(out, str) and out
+
+
+# ── Tool 3: create_fit_card (all offline — tools._chat is monkeypatched) ─────────
+
+OUTFIT = "Wear it with baggy jeans and chunky sneakers for an easy y2k look."
+
+
+def test_fit_card_empty_outfit_guard_no_llm_call(monkeypatch):
+    # Sentinel: if the guard fails to short-circuit and _chat is called, fail loudly.
+    def sentinel(*args, **kwargs):
+        pytest.fail("_chat must NOT be called when outfit is empty")
+    monkeypatch.setattr(tools, "_chat", sentinel)
+    for empty in ("", "   \n\t ", None):
+        assert create_fit_card(empty, SAMPLE_ITEM) == FIT_CARD_EMPTY_GUARD
+
+
+def test_fit_card_llm_raises_returns_fallback(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated API/timeout error")
+    monkeypatch.setattr(tools, "_chat", boom)
+    assert create_fit_card(OUTFIT, SAMPLE_ITEM) == FIT_CARD_FALLBACK
+
+
+def test_fit_card_llm_empty_returns_fallback(monkeypatch):
+    for empty in ("", "   \n ", None):
+        monkeypatch.setattr(tools, "_chat", lambda *a, **k: empty)
+        assert create_fit_card(OUTFIT, SAMPLE_ITEM) == FIT_CARD_FALLBACK
+
+
+def test_fit_card_prompt_content(monkeypatch):
+    captured = {}
+
+    def stub(messages, temperature, max_tokens):
+        captured["messages"] = messages
+        return "cute thrifted fit caption"
+
+    monkeypatch.setattr(tools, "_chat", stub)
+    item = dict(SAMPLE_ITEM, price=18.0, platform="depop", brand=None)
+    create_fit_card(OUTFIT, item)
+    prompt = " ".join(m["content"] for m in captured["messages"])
+    assert "$18" in prompt and "$18.0" not in prompt
+    assert "depop" in prompt
+    # brand is None → must not appear anywhere in the prompt
+    assert "Brand" not in prompt
