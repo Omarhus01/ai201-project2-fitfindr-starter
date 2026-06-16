@@ -414,3 +414,49 @@ def test_run_agent_service_error_distinct_from_1a(monkeypatch):
     session = run_agent("vintage tee", get_example_wardrobe())
     assert session["error"] == SERVICE_ERROR
     assert session["error"] != ONE_A
+
+
+# ── handle_query (app layer — patch app.run_agent — fully offline) ───────────────
+
+import app
+
+
+def _session(**overrides):
+    base = {
+        "query": "", "parsed": {}, "search_results": [], "selected_item": None,
+        "wardrobe": {}, "outfit_suggestion": None, "fit_card": None, "error": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_handle_query_empty_guard_does_not_run_agent(monkeypatch):
+    monkeypatch.setattr(app, "run_agent", lambda *a, **k: pytest.fail("run_agent must not run"))
+    for q in ("", "   \n "):
+        panel1, panel2, panel3 = app.handle_query(q, "Example wardrobe")
+        assert panel1 == "Please enter what you're looking for."
+        assert panel2 == "" and panel3 == ""
+
+
+def test_handle_query_error_path(monkeypatch):
+    monkeypatch.setattr(app, "run_agent", lambda q, w: _session(error="some error message"))
+    panel1, panel2, panel3 = app.handle_query("anything", "Example wardrobe")
+    assert panel1 == "some error message"
+    assert panel2 == "" and panel3 == ""
+
+
+def test_handle_query_happy_path_listing_format(monkeypatch):
+    item = {
+        "title": "Y2K Baby Tee — Butterfly Print", "price": 18.0,
+        "platform": "depop", "condition": "excellent",
+    }
+    full = _session(
+        selected_item=item,
+        outfit_suggestion="wear it with jeans",
+        fit_card="cute thrifted fit",
+    )
+    monkeypatch.setattr(app, "run_agent", lambda q, w: full)
+    panel1, panel2, panel3 = app.handle_query("vintage graphic tee", "Example wardrobe")
+    assert panel1 == "Y2K Baby Tee — Butterfly Print — $18, depop, excellent condition"
+    assert panel2 == "wear it with jeans"
+    assert panel3 == "cute thrifted fit"
