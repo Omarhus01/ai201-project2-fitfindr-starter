@@ -5,7 +5,22 @@ Phase 1 covers Tool 1 (search_listings) only. Every test here is fully offline �
 search_listings is a pure function over local JSON with no LLM and no network.
 """
 
-from tools import search_listings
+import tools
+from tools import search_listings, suggest_outfit
+from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+
+FALLBACK_2 = (
+    "Couldn't generate a full styling idea for this one — "
+    "but it's a versatile piece worth grabbing."
+)
+
+# A minimal valid listing dict for the Tool 2 tests (no network — _chat is patched).
+SAMPLE_ITEM = {
+    "id": "lst_x", "title": "Vintage Band Tee", "description": "soft faded cotton",
+    "category": "tops", "style_tags": ["vintage", "graphic tee"], "size": "M",
+    "condition": "good", "price": 19.0, "colors": ["grey"], "brand": None,
+    "platform": "depop",
+}
 
 
 # ── starter tests (from the milestone, kept as-is) ──────────────────────────────
@@ -104,3 +119,54 @@ def test_happy_path_sorted_and_top_result():
 
     keys = [(-score_of(i), -rank[i["condition"]], i["price"]) for i in results]
     assert keys == sorted(keys)
+
+
+# ── Tool 2: suggest_outfit (all offline — tools._chat is monkeypatched) ──────────
+
+def test_suggest_outfit_llm_raises_returns_fallback(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated API/timeout error")
+    monkeypatch.setattr(tools, "_chat", boom)
+    out = suggest_outfit(SAMPLE_ITEM, get_example_wardrobe())
+    assert out == FALLBACK_2
+
+
+def test_suggest_outfit_llm_empty_returns_fallback(monkeypatch):
+    for empty in ("", "   \n\t ", None):
+        monkeypatch.setattr(tools, "_chat", lambda *a, **k: empty)
+        out = suggest_outfit(SAMPLE_ITEM, get_example_wardrobe())
+        assert out == FALLBACK_2
+
+
+def test_suggest_outfit_empty_wardrobe_takes_general_path(monkeypatch):
+    captured = {}
+
+    def stub(messages, temperature, max_tokens):
+        captured["messages"] = messages
+        return "general styling advice here"
+
+    monkeypatch.setattr(tools, "_chat", stub)
+    out = suggest_outfit(SAMPLE_ITEM, get_empty_wardrobe())
+    assert out  # non-empty
+    prompt = " ".join(m["content"] for m in captured["messages"])
+    assert "the shopper hasn't added any wardrobe items" in prompt
+
+
+def test_suggest_outfit_non_empty_wardrobe_names_real_pieces(monkeypatch):
+    captured = {}
+
+    def stub(messages, temperature, max_tokens):
+        captured["messages"] = messages
+        return "Outfit 1: wear it with the jeans."
+
+    monkeypatch.setattr(tools, "_chat", stub)
+    suggest_outfit(SAMPLE_ITEM, get_example_wardrobe())
+    prompt = " ".join(m["content"] for m in captured["messages"])
+    assert "Baggy straight-leg jeans" in prompt
+
+
+def test_suggest_outfit_defensive_access_no_items_key(monkeypatch):
+    monkeypatch.setattr(tools, "_chat", lambda *a, **k: "advice")
+    # Wardrobe dict missing the "items" key must not raise (treated as empty).
+    out = suggest_outfit(SAMPLE_ITEM, {"_note": "new user template"})
+    assert isinstance(out, str) and out
