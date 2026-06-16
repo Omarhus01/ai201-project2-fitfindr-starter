@@ -103,21 +103,34 @@ def _get_groq_client():
 _MODEL = "llama-3.3-70b-versatile"
 
 
-def _chat(messages: list[dict], temperature: float, max_tokens: int) -> str | None:
+def _chat(
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    response_format: dict | None = None,
+) -> str | None:
     """Thin, DUMB wrapper around one Groq chat completion.
 
     Returns the raw message content (which may be None or empty). It does NOT
     catch errors, check for emptiness, or supply any fallback — each tool owns
     that. This is the single seam tests monkeypatch so the automated suite makes
     no network call.
+
+    response_format is optional: when provided (e.g. {"type": "json_object"} for
+    the query parser's JSON mode) it is forwarded to Groq; when None it is omitted
+    entirely, so the styling tools' behavior is unchanged.
     """
+    kwargs = {
+        "model": _MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
     client = _get_groq_client()
-    resp = client.chat.completions.create(
-        model=_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content
 
 

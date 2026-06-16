@@ -28,10 +28,13 @@ raw user sentence into a structured JSON contract that Tool 1 and the loop consu
 - `max_price` — float ceiling, or `null`.
 - `in_scope` — `true` if the request is a thrift/styling query, `false` otherwise.
 
-The parser prompt wording is locked in Batch 3. Because the parser now carries the full
-precision of search, its Batch 3 verification must test normalization output (right head
-noun, right size label), not just valid JSON — a silent mis-normalization surfaces as a
-false no-results that the parse-failure guard below won't catch.
+The parser prompt is authored in M4 Phase A (when `_parse_query` is built), not earlier.
+Because the parser carries the full precision of search, its verification must test
+normalization output (right head noun, right size label), not just valid JSON — a silent
+mis-normalization surfaces as a false no-results that the parse-failure guard below won't
+catch. The parser uses Groq JSON mode (`response_format={"type": "json_object"}`) at
+temperature ~0; bad JSON / missing keys / wrong types raise `ValueError` (→ 1a), while a
+Groq service error propagates as its own type (→ the service-error message).
 
 **D2 — Wardrobe source is whatever `run_agent` receives.** `app.py`'s radio passes
 `get_example_wardrobe()` (normal path) or `get_empty_wardrobe()` (tests the empty-wardrobe
@@ -315,7 +318,8 @@ added because the loop depends on them.)
 
 | Tool / step | Failure mode | Agent response (specific + actionable) |
 |-------------|--------------|----------------------------------------|
-| parser (Step 1) | call raises or returns non-JSON / missing keys | "I couldn't read that request — try naming an item, a size, or a price, e.g. 'vintage denim jacket size M under $40.'" → return early, no tools called |
+| parser (Step 1) | bad JSON / missing keys / wrong types (ValueError) | "I couldn't read that request — try naming an item, a size, or a price, e.g. 'vintage denim jacket size M under $40.'" → return early, no tools called |
+| parser (Step 1) | Groq API / connection / timeout error (non-ValueError) | "FitFindr is having trouble reaching its service right now — please try again in a moment." → return early, no tools called |
 | parser (Step 1) | `in_scope == false` (off-topic / distressing) | Brief, kind, on-topic redirect: state that FitFindr only helps find and style secondhand clothes; if the input signals distress, respond gently and point toward real support rather than styling it. → return early |
 | search_listings (Step 2) | `results == []` | Name what was searched and what to loosen: "No listings matched 'X' in size Y under $Z. Try removing the size filter, raising the price, or searching a different item." → return early, `suggest_outfit` NOT called |
 | suggest_outfit (Step 4) | wardrobe is empty | NOT an error — the tool returns general styling advice for the item (what pairs well, what vibe it suits) instead of naming owned pieces. Flow continues to the fit card. |
