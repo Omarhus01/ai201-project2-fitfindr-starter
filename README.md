@@ -1,5 +1,7 @@
 # FitFindr
 
+**Demo video:** https://www.loom.com/share/58b1ec246f00410ca0b68995eb34e9fe
+
 FitFindr takes a natural-language thrifting request and orchestrates three tools in
 response to it. A user query triggers `search_listings`, which filters the mock dataset by
 description, size, and price and returns matching items; the top match flows into
@@ -128,6 +130,33 @@ The other failure modes, briefly:
 
 The full table, with every failure mode and the exact agent response, is in `planning.md`
 under Error Handling.
+
+## Screenshots
+
+**Happy path — full 3-tool flow (Example wardrobe + style note)**
+The search returns a Y2K Baby Tee at $18 from Depop. The price check shows it's a good deal ($18 vs $21.50 median for tops). The outfit suggestion names specific wardrobe pieces (baggy jeans, combat boots, vintage denim jacket). The fit card is a casual caption that sounds like a real post.
+
+![Happy path — all three panels populated](screenshots/happy-path-full.png)
+
+**Error path — no results (Branch 2a)**
+`"designer ballgown size XXS under $5"` matches nothing in the dataset. The agent tells the user exactly what was searched and what to try instead. The Outfit idea and Your fit card panels stay empty — `suggest_outfit` was never called.
+
+![No results error — outfit and fit card panels empty](screenshots/no-results-error.png)
+
+**Empty wardrobe + style profile memory (Stretch 4)**
+With no wardrobe items, `suggest_outfit` gives general styling advice instead of inventing pieces. The style note ("I like y2k and grunge") was saved via the Save my style profile button and persists across sessions.
+
+![Empty wardrobe fallback with saved style profile](screenshots/empty-wardrobe-style-profile.png)
+
+**Price check — "high" verdict (Stretch 2)**
+`"knit cardigan"` finds the Chunky Brown Knit Cardigan at $35. The price check compares it against the category median ($20.50 for tops) and calls it high — surfaced in Panel 1 without blocking the rest of the flow.
+
+![Price high verdict shown in the listing panel](screenshots/price-high-verdict.png)
+
+**Test suite — 54 tests passing**
+All tools, the planning loop, and all stretch features are covered. Every LLM call is monkeypatched at `tools._chat` so the full suite runs offline in under 3 seconds.
+
+![54 pytest tests passing in 2.77 s](screenshots/tests-passing.png)
 
 ## Spec reflection
 
